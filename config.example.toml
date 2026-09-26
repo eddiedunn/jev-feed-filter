@@ -1,0 +1,59 @@
+# Everything you tune lives in this file.
+
+[news]
+feeds = [
+  "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+  "https://feeds.bbci.co.uk/news/rss.xml",
+  "https://feeds.npr.org/1001/rss.xml",
+  "https://www.pbs.org/newshour/feeds/rss/headlines",
+  "https://www.theguardian.com/us-news/rss",
+  "https://www.aljazeera.com/xml/rss/all.xml",
+  "https://www.allsides.com/rss/news",
+  "https://thehill.com/feed/",
+  "https://moxie.foxnews.com/google-publisher/latest.xml",
+]
+
+# Stories from these sites are dropped before Jev sees them. A starter list of
+# sites known to paywall; add any site that asks you to pay.
+paywall_domains = [
+  "nytimes.com", "washingtonpost.com", "wsj.com", "ft.com", "bloomberg.com",
+  "economist.com", "theatlantic.com", "newyorker.com", "latimes.com",
+  "businessinsider.com", "theinformation.com", "barrons.com", "bostonglobe.com",
+  "chicagotribune.com", "wired.com", "thetimes.co.uk", "telegraph.co.uk",
+  "seattletimes.com", "sfchronicle.com", "nymag.com", "vanityfair.com",
+  "foreignpolicy.com", "foreignaffairs.com", "hbr.org", "marketwatch.com",
+  "fortune.com", "insider.com",
+]
+
+# Exact words or phrases (case-insensitive). Any match hides the story.
+hide_keywords = []
+
+# Plain-English topics. Jev hides a story that is mainly about one of these.
+hide_topics = [
+  # "celebrity gossip",
+  # "sports",
+]
+
+# Story formats to hide: straight_news, analysis, opinion, promotional
+hide_formats = ["opinion", "promotional"]
+
+[jev]
+model = "~typesafe/jev-latest"
+base_url = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
+# gopass_key = "path/to/key"        # optional: read the key from gopass if the env var is unset
+concurrency = 10
+
+# Probability at or above which a story is hidden.
+strong_slant = 0.5
+topic_match = 0.7
+
+[youtube]
+channel_handle = ""                 # e.g. "@YourHandle"; subscriptions must be public. Empty skips YouTube.
+# Key comes from YOUTUBE_API_KEY, or uncomment:
+# gopass_key = "path/to/key"
+days = 3                            # how far back to look
+
+# Same idea as news: exact words hide a video; topics are judged by Jev.
+hide_keywords = []
+hide_topics = []
