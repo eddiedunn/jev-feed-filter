@@ -2,10 +2,12 @@
 # requires-python = ">=3.11"
 # dependencies = ["typesafe-sdk>=0.7.1", "feedparser>=6", "httpx>=0.27"]
 # ///
-"""Pull news and YouTube feeds, filter them with plain code and Jev, write out/*.html."""
+"""Pull news and YouTube feeds, filter them with plain code and Jev, write out/index.html."""
 
 import asyncio
+import calendar
 import html
+import json
 import os
 import re
 import subprocess
@@ -44,17 +46,35 @@ VIDEO_FORMATS = {
     "music": "Music performance or music video",
     "gaming": "Video game play or gaming content",
 }
+TOPICS = {
+    "politics": "Government, elections, policy, or political figures",
+    "world": "International affairs, conflicts, or events in other countries",
+    "business": "Companies, markets, the economy, money, or investing",
+    "tech": "Technology, software, AI, gadgets, or the internet",
+    "science": "Science, space, engineering, nature, or the environment",
+    "health": "Health, medicine, or fitness",
+    "sports": "Sports and athletes",
+    "entertainment": "Movies, TV, music, celebrities, games, or pop culture",
+    "lifestyle": "Travel, food, home, hobbies, relationships, or personal life",
+    "other": "None of the above",
+}
+TOPIC_QUESTION = Choice(instructions="What is the main subject?", criteria=TOPICS)
+KEEP_SEEN_DAYS = 14
 
 
 @dataclass
 class Item:
+    id: str  # the link for news, the video id for YouTube
     title: str
     summary: str
     link: str
     outlet: str
-    domain: str
     published: float
-    label: str = ""
+    domain: str = ""
+    image: str = ""
+    topic: str = ""
+    chips: list[str] = field(default_factory=list)
+    new: bool = False
     hidden_because: list[str] = field(default_factory=list)
 
 
@@ -78,7 +98,7 @@ def strip_html(text: str) -> str:
 
 def entry_time(e) -> float:
     when = e.get("published_parsed") or e.get("updated_parsed")
-    return time.mktime(when) if when else 0
+    return calendar.timegm(when) if when else 0  # feedparser gives UTC
 
 
 def keyword_filter(items: list[Item], keywords: list[str]) -> None:
@@ -116,9 +136,28 @@ async def ask_jev(items: list[Item], state_of, qs: dict, jev: dict) -> list:
 # ---------- news ----------
 
 
-def read_news_feed(url: str) -> list[Item]:
+def feed_image(e) -> str:
+    """The first image a feed entry carries, in any of the ways feeds carry them."""
+    for m in e.get("media_thumbnail", []):
+        if m.get("url"):
+            return m["url"]
+    for m in e.get("media_content", []):
+        if m.get("url") and m.get("medium", "image") == "image" and not str(m.get("type", "")).startswith(("video", "audio")):
+            return m["url"]
+    for link in e.get("links", []):
+        if link.get("rel") == "enclosure" and str(link.get("type", "")).startswith("image"):
+            return link["href"]
+    body = " ".join(c.get("value", "") for c in e.get("content", [])) + e.get("summary", "")
+    m = re.search(r'<img[^>]+src="([^"]+)"', body)
+    return html.unescape(m.group(1)) if m else ""
+
+
+def read_news_feed(feed: str | dict) -> list[Item]:
+    # A feed is a URL, or {name = "...", url = "..."} to show a short outlet name.
+    url = feed["url"] if isinstance(feed, dict) else feed
     parsed = feedparser.parse(url, agent="Mozilla/5.0 jev-feed-filter")
-    feed_title = parsed.feed.get("title", domain_of(url))
+    feed_title = feed.get("name") if isinstance(feed, dict) else None
+    feed_title = feed_title or parsed.feed.get("title", domain_of(url))
     items = []
     for e in parsed.entries:
         title, link = e.get("title", ""), e.get("link", "")
@@ -129,7 +168,7 @@ def read_news_feed(url: str) -> list[Item]:
             outlet, domain = e.source.get("title", outlet), domain_of(e.source["href"])
             title = title.removesuffix(f" - {outlet}")
             summary = ""  # just a list of links
-        items.append(Item(title, summary, link, outlet, domain, entry_time(e)))
+        items.append(Item(link, title, summary, link, outlet, entry_time(e), domain=domain, image=feed_image(e)))
     return items
 
 
@@ -157,6 +196,7 @@ def run_news(news: dict, jev: dict) -> list[Item]:
             instructions="How politically one-sided is the wording and framing of this story?",
             criteria=SLANT_LEVELS,
         ),
+        "topic": TOPIC_QUESTION,
         **topic_questions(news["hide_topics"], "story"),
     }
 
@@ -165,7 +205,9 @@ def run_news(news: dict, jev: dict) -> list[Item]:
 
     for s, a in zip(todo, asyncio.run(ask_jev(todo, state_of, qs, jev))):
         fmt = a["format"].choice
-        s.label = fmt.replace("_", " ")
+        s.topic = a["topic"].choice
+        if fmt != "straight_news":
+            s.chips.append(fmt.replace("_", " "))
         if fmt in news["hide_formats"]:
             s.hidden_because.append(f"format: {fmt}")
         strong = a["slant"].probabilities[len(SLANT_LEVELS) - 1]
@@ -206,14 +248,16 @@ def read_channel_feed(channel_id: str) -> list[Item]:
     parsed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
     return [
         Item(
+            vid,
             e.get("title", ""),
             e.get("summary", "")[:500],
             e.get("link", ""),
             parsed.feed.get("title", ""),
-            e.get("yt_videoid", ""),  # the video id rides in `domain` for videos
             entry_time(e),
+            image=f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",  # 16:9, no letterboxing
         )
         for e in parsed.entries
+        if (vid := e.get("yt_videoid", ""))
     ]
 
 
@@ -233,13 +277,13 @@ def run_youtube(yt: dict, jev: dict) -> list[Item]:
 
         details = {}
         for i in range(0, len(videos), 50):
-            ids = ",".join(v.domain for v in videos[i : i + 50])
+            ids = ",".join(v.id for v in videos[i : i + 50])
             r = api.get("videos", params={"part": "contentDetails,snippet,liveStreamingDetails", "id": ids}).json()
             details |= {d["id"]: d for d in r["items"]}
 
     maybe_short = []
     for v in videos:
-        d = details.get(v.domain)
+        d = details.get(v.id)
         if not d:
             v.hidden_because.append("unavailable")
             continue
@@ -249,11 +293,11 @@ def run_youtube(yt: dict, jev: dict) -> list[Item]:
             v.hidden_because.append("livestream")
             continue
         seconds = iso_seconds(d["contentDetails"].get("duration", ""))
-        v.label = clock(seconds)
+        v.chips.append(clock(seconds))
         if seconds <= 180:  # Shorts can run up to 3 minutes
             maybe_short.append(v)
     with ThreadPoolExecutor(16) as pool:
-        for v, short in zip(maybe_short, pool.map(lambda v: is_short(v.domain), maybe_short)):
+        for v, short in zip(maybe_short, pool.map(lambda v: is_short(v.id), maybe_short)):
             if short:
                 v.hidden_because.append("short")
     keyword_filter(videos, yt["hide_keywords"])
@@ -261,6 +305,7 @@ def run_youtube(yt: dict, jev: dict) -> list[Item]:
     todo = [v for v in videos if not v.hidden_because]
     qs = {
         "format": Choice(instructions="What kind of video is this?", criteria=VIDEO_FORMATS),
+        "topic": TOPIC_QUESTION,
         **topic_questions(yt["hide_topics"], "video"),
     }
 
@@ -268,7 +313,8 @@ def run_youtube(yt: dict, jev: dict) -> list[Item]:
         return {"title": v.title, "channel": v.outlet, "description": v.summary}
 
     for v, a in zip(todo, asyncio.run(ask_jev(todo, state_of, qs, jev))):
-        v.label = f"{v.label} · {a['format'].choice.replace('_', ' ')}"
+        v.chips.append(a["format"].choice.replace("_", " "))
+        v.topic = a["topic"].choice
         apply_topics(v, a, yt["hide_topics"], jev["topic_match"])
     return videos
 
@@ -276,41 +322,83 @@ def run_youtube(yt: dict, jev: dict) -> list[Item]:
 # ---------- output ----------
 
 
-def render(heading: str, items: list[Item]) -> str:
-    def row(it: Item) -> str:
-        why = f'<span class="why">{html.escape("; ".join(it.hidden_because))}</span>' if it.hidden_because else ""
-        label = f'<span class="label">{html.escape(it.label)}</span> ' if it.label else ""
-        when = time.strftime("%b %d %H:%M", time.localtime(it.published)) if it.published else ""
-        return (
-            f'<li><a href="{html.escape(it.link)}" target="_blank" rel="noopener">{html.escape(it.title)}</a>'
-            f'<div class="meta">{label}{html.escape(it.outlet)} · {when} {why}</div></li>'
-        )
+def mark_new(section: str, items: list[Item], state: dict) -> None:
+    """Flag items first seen in this run. On the very first run nothing is flagged."""
+    first_run = section not in state
+    seen = state.setdefault(section, {})
+    now = time.time()
+    for it in items:
+        if it.id not in seen:
+            seen[it.id] = now
+            it.new = not first_run
+    for key in [k for k, t in seen.items() if t < now - KEEP_SEEN_DAYS * 86400]:
+        del seen[key]
 
+
+def card(it: Item, wide_thumb: bool) -> str:
+    e = html.escape
+    link = f'href="{e(it.link)}" target="_blank" rel="noopener"'
+    thumb = (
+        f'<a class="thumb{" wide" if wide_thumb else ""}" {link} tabindex="-1">'
+        f'<img src="{e(it.image)}" alt="" loading="lazy" referrerpolicy="no-referrer"></a>'
+        if it.image
+        else ""
+    )
+    chips = "".join(f'<span class="chip">{e(c)}</span>' for c in ([it.topic] if it.topic else []) + it.chips)
+    why = f'<span class="why">{e("; ".join(it.hidden_because))}</span>' if it.hidden_because else ""
+    new = '<span class="badge">New</span>' if it.new else ""
+    summary = f'<p class="sum">{e(it.summary)}</p>' if it.summary else ""
+    return (
+        f'<article class="card" data-topic="{e(it.topic)}" data-new="{int(it.new)}">{thumb}<div class="body">'
+        f'<a class="title" {link}>{e(it.title)}</a>{summary}'
+        f'<div class="meta">{new}<span>{e(it.outlet)}</span><time data-ts="{int(it.published)}"></time>{chips}{why}</div>'
+        f"</div></article>"
+    )
+
+
+def panel(key: str, items: list[Item]) -> str:
     kept = [it for it in items if not it.hidden_because]
     hidden = [it for it in items if it.hidden_because]
-    return f"""<!doctype html><meta charset="utf-8"><title>{heading}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-:root{{--bg:#fff;--fg:#1a1a1a;--dim:#666;--link:#1a4fb5;--warn:#a44;--chip:#eef1f6}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#16181c;--fg:#e6e6e6;--dim:#999;--link:#8ab4f8;--warn:#e88;--chip:#262a31}}}}
-body{{background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,sans-serif;max-width:760px;margin:0 auto;padding:16px}}
-ul{{list-style:none;padding:0}} li{{margin:0 0 14px}} a{{color:var(--link);text-decoration:none}}
-.meta{{color:var(--dim);font-size:13px}} .why{{color:var(--warn)}} summary{{cursor:pointer;color:var(--dim)}}
-.label{{background:var(--chip);color:var(--fg);border-radius:4px;padding:0 5px}}
-</style>
-<h1>{heading} <small style="color:var(--dim);font-size:14px">{len(kept)} shown · {len(hidden)} hidden</small></h1>
-<ul>{"".join(map(row, kept))}</ul>
-<details><summary>Hidden ({len(hidden)})</summary><ul>{"".join(map(row, hidden))}</ul></details>
-"""
+    wide = key == "youtube"
+    counts = {t: sum(it.topic == t for it in kept) for t in TOPICS}
+    new = sum(it.new for it in kept)
+    buttons = [f'<button class="f on" data-f="">All <b>{len(kept)}</b></button>']
+    if new:
+        buttons.append(f'<button class="f" data-f="new">New <b>{new}</b></button>')
+    buttons += [f'<button class="f" data-f="{t}">{t} <b>{n}</b></button>' for t, n in counts.items() if n]
+    return (
+        f'<section class="panel" data-tab="{key}" hidden><nav class="filters">{"".join(buttons)}</nav>'
+        f'<div class="list">{"".join(card(it, wide) for it in kept)}</div>'
+        f'<details class="hidden-items"><summary>Hidden ({len(hidden)})</summary>'
+        f'<div class="list">{"".join(card(it, wide) for it in hidden)}</div></details></section>'
+    )
 
 
-def write(name: str, heading: str, items: list[Item]) -> None:
-    items.sort(key=lambda it: it.published, reverse=True)
-    out = ROOT / "out" / f"{name}.html"
+def write(sections: dict[str, list[Item]]) -> None:
+    state_file = ROOT / "state" / "seen.json"
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    tabs, panels = [], []
+    for key, items in sections.items():
+        items.sort(key=lambda it: it.published, reverse=True)
+        mark_new(key, items, state)
+        shown = sum(not it.hidden_because for it in items)
+        print(f"{'YouTube' if key == 'youtube' else 'News'}: {len(items)} items, {shown} shown, {len(items) - shown} hidden")
+        tabs.append(f'<button class="tab" data-tab="{key}">{"YouTube" if key == "youtube" else "News"} <b>{shown}</b></button>')
+        panels.append(panel(key, items))
+
+    page = (
+        (ROOT / "page.html")
+        .read_text()
+        .replace("{{UPDATED}}", str(int(time.time())))
+        .replace("{{TABS}}", "".join(tabs))
+        .replace("{{PANELS}}", "".join(panels))
+    )
+    out = ROOT / "out" / "index.html"
     out.parent.mkdir(exist_ok=True)
-    out.write_text(render(heading, items))
-    shown = sum(not it.hidden_because for it in items)
-    print(f"{heading}: {len(items)} items, {shown} shown, {len(items) - shown} hidden -> {out}")
+    out.write_text(page)
+    state_file.parent.mkdir(exist_ok=True)
+    state_file.write_text(json.dumps(state))
+    print(f"-> {out}")
 
 
 def main() -> None:
@@ -318,9 +406,10 @@ def main() -> None:
     if not path.exists():
         raise SystemExit("No config.toml. Copy config.example.toml to config.toml and edit it.")
     cfg = tomllib.loads(path.read_text())
-    write("news", "News", run_news(cfg["news"], cfg["jev"]))
+    sections = {"news": run_news(cfg["news"], cfg["jev"])}
     if cfg.get("youtube", {}).get("channel_handle"):
-        write("youtube", "YouTube", run_youtube(cfg["youtube"], cfg["jev"]))
+        sections["youtube"] = run_youtube(cfg["youtube"], cfg["jev"])
+    write(sections)
 
 
 if __name__ == "__main__":

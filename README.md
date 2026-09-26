@@ -1,7 +1,7 @@
 # jev-feed-filter
 
-Filters news and YouTube feeds and writes two plain HTML pages, `out/news.html` and
-`out/youtube.html`.
+Filters news and YouTube feeds and writes one static page, `out/index.html`, with a News tab
+and a YouTube tab.
 
 - **News**: drops paywalled sites, strongly slanted stories (from either side), opinion and
   promotional pieces, and any keywords or topics you list.
@@ -14,8 +14,19 @@ code. Judgment calls (story format, slant, topic, video type) are made by
 probabilities instead of writing text, so it's fast and cheap: a full pass over a few hundred
 stories and videos costs around a cent.
 
-Each page has a collapsed **Hidden** section that lists every dropped item and the reason, so
-you can see when a filter is wrong.
+On the page:
+- **Cards:** each item shows its image or video thumbnail (when the feed has one), the feed's
+  summary, the outlet, how long ago it was published, and chips for its topic and format.
+  Videos also show their length.
+- **Filter buttons:** show one topic at a time. Topics are politics, world, business, tech,
+  science, health, sports, entertainment, lifestyle and other.
+- **New since last run:** items that arrived since the previous run are marked **New** and get
+  their own filter button. The page remembers what it has shown in `state/seen.json`, for 14 days.
+- **Hidden section:** each tab has a collapsed **Hidden** section listing every dropped item and
+  the reason, so you can see when a filter is wrong.
+
+The page is a single file with a little inline JavaScript, so any static file server can serve
+the `out/` folder. Its layout lives in `page.html`.
 
 ## Setup
 
@@ -46,7 +57,8 @@ section instead of an environment variable. The environment variable wins when b
 
 Everything is in `config.toml`:
 
-- **`[news]`**: `feeds`, `paywall_domains`, `hide_keywords`, `hide_topics`, `hide_formats`
+- **`[news]`**: `feeds` (each a URL, or `{ name = "BBC", url = "..." }` to set the outlet name
+  shown on the page), `paywall_domains`, `hide_keywords`, `hide_topics`, `hide_formats`
   (any of `straight_news`, `analysis`, `opinion`, `promotional`).
 - **`[jev]`**: model, endpoint, key, concurrency, and the cutoffs.
   - `strong_slant`: hide a story when the probability that it is strongly one-sided is at least
@@ -93,7 +105,8 @@ pass uses about 15 of the default 10,000 daily units.
   is sent to OpenRouter and TypeSafe.
 - **Personal use only:** the Google News feed and most publisher feeds are offered for personal,
   non-commercial use in a feed reader. This tool is meant for each person to run for themselves.
-  Don't host the generated pages publicly. `out/` is git-ignored for that reason.
+  Don't host the generated page publicly; a private network you control
+  is fine. `out/` is git-ignored for that reason.
 
 ## License
 

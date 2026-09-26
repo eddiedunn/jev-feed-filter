@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Feeds</title>
+<style>
+:root {
+  --bg: #f7f7f5; --card: #ffffff; --fg: #1b1b1a; --dim: #6b6b66; --line: #e4e3df;
+  --link: #1d4ed8; --chip: #efeee9; --accent: #1d4ed8; --accent-fg: #ffffff;
+  --new: #0f7a3d; --warn: #b42318;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121315; --card: #1b1c1f; --fg: #e8e8e6; --dim: #9a9a95; --line: #2c2d31;
+    --link: #93b4ff; --chip: #2a2b30; --accent: #93b4ff; --accent-fg: #0d1117;
+    --new: #5fd08f; --warn: #ff8a80;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, -apple-system, sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); }
+.bar { max-width: 820px; margin: 0 auto; padding: 10px 16px 0; }
+.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+h1 { font-size: 18px; margin: 0; }
+.updated { color: var(--dim); font-size: 13px; }
+.tabs { display: flex; gap: 4px; margin-top: 8px; }
+.tab { flex: 1; border: 0; background: none; color: var(--dim); font: inherit; font-weight: 600; padding: 8px 0;
+  border-bottom: 3px solid transparent; cursor: pointer; }
+.tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+.tab b, .f b { font-weight: 500; color: var(--dim); margin-left: 2px; }
+main { max-width: 820px; margin: 0 auto; padding: 12px 16px 48px; }
+.filters { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; scrollbar-width: none; }
+.f { flex: none; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; font-size: 14px;
+  padding: 4px 11px; border-radius: 999px; cursor: pointer; text-transform: capitalize; }
+.f.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.f.on b { color: inherit; }
+.list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.card { display: flex; gap: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.thumb { flex: none; width: 76px; height: 76px; border-radius: 6px; overflow: hidden; background: var(--chip); }
+.thumb.wide { width: 128px; height: 72px; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.body { min-width: 0; flex: 1; }
+.title { overflow-wrap: anywhere; color: var(--fg); text-decoration: none; font-weight: 600; line-height: 1.3; }
+.title:hover { color: var(--link); }
+.sum { margin: 4px 0 0; color: var(--dim); font-size: 14px; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 6px; overflow-wrap: anywhere; color: var(--dim); font-size: 13px; }
+.chip { background: var(--chip); color: var(--fg); border-radius: 4px; padding: 0 6px; text-transform: capitalize; }
+.badge { color: var(--new); font-weight: 700; }
+.why { color: var(--warn); }
+.hidden-items { margin-top: 24px; }
+.hidden-items summary { cursor: pointer; color: var(--dim); padding: 6px 0; }
+.hidden-items .card { opacity: .75; }
+.card.gone { display: none; }
+@media (min-width: 640px) {
+  .thumb { width: 96px; height: 96px; }
+  .thumb.wide { width: 192px; height: 108px; }
+}
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <div class="top"><h1>Feeds</h1><span class="updated">Updated <time data-ts="{{UPDATED}}"></time></span></div>
+  <nav class="tabs">{{TABS}}</nav>
+</div></header>
+<main>{{PANELS}}</main>
+<script>
+(function () {
+  // Times are written as Unix seconds and shown in the viewer's own time zone.
+  var now = Date.now() / 1000;
+  document.querySelectorAll("time[data-ts]").forEach(function (t) {
+    var ts = +t.dataset.ts;
+    if (!ts) return;
+    var d = new Date(ts * 1000), ago = now - ts;
+    t.title = d.toLocaleString();
+    t.textContent = ago < 3600 ? Math.max(1, Math.round(ago / 60)) + "m ago"
+      : ago < 86400 ? Math.round(ago / 3600) + "h ago"
+      : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  });
+
+  var tabs = document.querySelectorAll(".tab");
+  function show(key) {
+    var found = false;
+    tabs.forEach(function (b) { var on = b.dataset.tab === key; b.classList.toggle("on", on); found = found || on; });
+    if (!found) return show(tabs[0].dataset.tab);
+    document.querySelectorAll(".panel").forEach(function (p) { p.hidden = p.dataset.tab !== key; });
+    try { localStorage.setItem("tab", key); } catch (e) {}
+  }
+  tabs.forEach(function (b) {
+    b.addEventListener("click", function () { history.replaceState(null, "", "#" + b.dataset.tab); show(b.dataset.tab); });
+  });
+  var saved = null;
+  try { saved = localStorage.getItem("tab"); } catch (e) {}
+  show(location.hash.slice(1) || saved || tabs[0].dataset.tab);
+
+  // Filter buttons only affect the kept items in their own tab.
+  document.querySelectorAll(".panel").forEach(function (panel) {
+    var cards = panel.querySelectorAll(":scope > .list > .card");
+    panel.querySelectorAll(".f").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        panel.querySelectorAll(".f").forEach(function (b) { b.classList.toggle("on", b === btn); });
+        var f = btn.dataset.f;
+        cards.forEach(function (c) {
+          var match = !f || (f === "new" ? c.dataset.new === "1" : c.dataset.topic === f);
+          c.classList.toggle("gone", !match);
+        });
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

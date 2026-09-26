@@ -2,15 +2,16 @@
 
 [news]
 feeds = [
-  "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
-  "https://feeds.bbci.co.uk/news/rss.xml",
-  "https://feeds.npr.org/1001/rss.xml",
-  "https://www.pbs.org/newshour/feeds/rss/headlines",
-  "https://www.theguardian.com/us-news/rss",
-  "https://www.aljazeera.com/xml/rss/all.xml",
-  "https://www.allsides.com/rss/news",
-  "https://thehill.com/feed/",
-  "https://moxie.foxnews.com/google-publisher/latest.xml",
+  # A plain URL works too; `name` is the outlet name shown on the page.
+  { name = "Google News", url = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en" },
+  { name = "BBC", url = "https://feeds.bbci.co.uk/news/rss.xml" },
+  { name = "NPR", url = "https://feeds.npr.org/1001/rss.xml" },
+  { name = "PBS NewsHour", url = "https://www.pbs.org/newshour/feeds/rss/headlines" },
+  { name = "The Guardian", url = "https://www.theguardian.com/us-news/rss" },
+  { name = "Al Jazeera", url = "https://www.aljazeera.com/xml/rss/all.xml" },
+  { name = "AllSides", url = "https://www.allsides.com/rss/news" },
+  { name = "The Hill", url = "https://thehill.com/feed/" },
+  { name = "Fox News", url = "https://moxie.foxnews.com/google-publisher/latest.xml" },
 ]
 
 # Stories from these sites are dropped before Jev sees them. A starter list of

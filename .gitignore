@@ -3,3 +3,4 @@ config.toml
 SESSION-NOTES.md
 __pycache__/
 .venv/
+state/
