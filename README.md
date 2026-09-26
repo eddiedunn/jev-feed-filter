@@ -8,6 +8,8 @@ and a YouTube tab.
 - **YouTube**: drops Shorts and livestreams from your subscriptions, and labels everything else
   with its length and type (tutorial, review, explainer, and so on).
 
+<p align="center"><img src="docs/screenshot.png" alt="The News tab on a phone: topic filter buttons above cards with an image, headline, summary, outlet, age, and topic and format chips" width="360"></p>
+
 Exact checks (paywalled domains, keywords, video length, Shorts, livestreams) are done in plain
 code. Judgment calls (story format, slant, topic, video type) are made by
 [Jev](https://docs.typesafe.ai), TypeSafe's "System One" model. Jev answers fixed questions with
