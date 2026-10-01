@@ -90,6 +90,28 @@ pass uses about 15 of the default 10,000 daily units.
   videos of 3 minutes or less, the tool requests `youtube.com/shorts/<id>`, which loads for a
   Short and redirects for anything else. That address isn't part of the official API.
 
+## Stored history
+
+Every run records every item, shown or hidden, in `state/items.db` (SQLite, git-ignored), so you
+can later check how well the rules are doing:
+
+- **`items`**: one row per story or video (`section` is `news` or `youtube`, `id` is the link or
+  video id), with `first_seen` and `last_seen`.
+- **`rules`**: each distinct set of rules, as JSON: the Jev questions, cutoffs and hide lists,
+  plus `RULES_REVISION` from `portal.py`, which you bump when you change the code's logic.
+- **`judgements`**: one row per item per set of rules: Jev's full answers with probabilities
+  (`answers`, empty for items dropped before Jev), the Jev version, topic, chips, hide reasons
+  and `shown`. Changing the rules starts new rows, so old and new judgements can be compared.
+- **`runs`**: per run, the rules used and how many items were shown.
+
+For example, the stories hidden for slant in the last week:
+
+```
+python3 -c "import sqlite3; db = sqlite3.connect('state/items.db')
+for r in db.execute('''select i.title, j.hidden_because from judgements j join items i using (section, id)
+    where j.hidden_because like '%slant%' and i.first_seen > unixepoch() - 7 * 86400'''): print(*r)"
+```
+
 ## Limitations
 
 - **Accuracy:** Jev reads text literally, and its answers vary slightly from run to run, so items

@@ -6,10 +6,12 @@
 
 import asyncio
 import calendar
+import hashlib
 import html
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import time
 import tomllib
@@ -60,6 +62,22 @@ TOPICS = {
 }
 TOPIC_QUESTION = Choice(instructions="What is the main subject?", criteria=TOPICS)
 KEEP_SEEN_DAYS = 14
+# Bump when the code's hide or grouping logic changes, so stored judgements stay comparable.
+RULES_REVISION = 1
+DB_SCHEMA = """
+create table if not exists items (
+  section text not null, id text not null, title text, summary text, link text, outlet text,
+  domain text, image text, published real, first_seen real, last_seen real,
+  primary key (section, id));
+create table if not exists rules (id text primary key, section text, created real, rules text);
+create table if not exists judgements (
+  section text not null, id text not null, rules_id text not null, judged real, model text,
+  answers text, topic text, chips text, hidden_because text, shown integer,
+  primary key (section, id, rules_id));
+create table if not exists runs (at real primary key, summary text);
+create index if not exists judgements_rules on judgements (rules_id);
+create index if not exists items_published on items (published);
+"""
 
 
 @dataclass
@@ -76,6 +94,8 @@ class Item:
     chips: list[str] = field(default_factory=list)
     new: bool = False
     hidden_because: list[str] = field(default_factory=list)
+    answers: dict | None = None  # Jev's full answers, kept for later evaluation
+    model: str = ""  # the Jev version that answered
 
 
 def secret(env_var: str, section: dict) -> str:
@@ -121,16 +141,30 @@ def apply_topics(it: Item, answers, topics: list[str], threshold: float) -> None
 
 
 async def ask_jev(items: list[Item], state_of, qs: dict, jev: dict) -> list:
-    """One Jev request per item, all with the same questions. Returns answers in order."""
+    """One Jev request per item, all with the same questions. Returns answers in order, and keeps
+    a copy of each item's answers on the item."""
     key = secret(jev.get("api_key_env", "OPENROUTER_API_KEY"), jev)
     gate = asyncio.Semaphore(jev["concurrency"])
     async with AsyncTypeSafeClient(api_key=key, base_url=jev["base_url"], model=jev["model"]) as client:
 
         async def one(it: Item):
             async with gate:
-                return (await client.system_one(state_of(it), qs)).answers
+                r = await client.system_one(state_of(it), qs)
+                it.answers = {k: a.model_dump(mode="json") for k, a in r.answers.items()}
+                it.model = r.model
+                return r.answers
 
         return await asyncio.gather(*(one(it) for it in items))
+
+
+def rules_of(jev: dict, qs: dict, settings: dict) -> dict:
+    """Everything that decides how items are judged, stored with each judgement."""
+    return {
+        "revision": RULES_REVISION,
+        "model": jev["model"],
+        "questions": {k: q.model_dump(mode="json") for k, q in qs.items()},
+        "settings": settings,
+    }
 
 
 # ---------- news ----------
@@ -172,7 +206,7 @@ def read_news_feed(feed: str | dict) -> list[Item]:
     return items
 
 
-def run_news(news: dict, jev: dict) -> list[Item]:
+def run_news(news: dict, jev: dict) -> tuple[list[Item], dict]:
     with ThreadPoolExecutor(8) as pool:
         stories = [s for batch in pool.map(read_news_feed, news["feeds"]) for s in batch]
     seen, unique = set(), []
@@ -214,7 +248,8 @@ def run_news(news: dict, jev: dict) -> list[Item]:
         if strong >= jev["strong_slant"]:
             s.hidden_because.append(f"strong slant ({strong:.2f})")
         apply_topics(s, a, news["hide_topics"], jev["topic_match"])
-    return unique
+    settings = {k: news[k] for k in ("paywall_domains", "hide_keywords", "hide_topics", "hide_formats")}
+    return unique, rules_of(jev, qs, settings | {k: jev[k] for k in ("strong_slant", "topic_match")})
 
 
 # ---------- youtube ----------
@@ -267,7 +302,7 @@ def is_short(video_id: str) -> bool:
     return r.status_code == 200
 
 
-def run_youtube(yt: dict, jev: dict) -> list[Item]:
+def run_youtube(yt: dict, jev: dict) -> tuple[list[Item], dict]:
     with httpx.Client(base_url="https://www.googleapis.com/youtube/v3/", params={"key": secret("YOUTUBE_API_KEY", yt)}) as api:
         channels = subscriptions(api, yt["channel_handle"])
         with ThreadPoolExecutor(16) as pool:
@@ -316,7 +351,8 @@ def run_youtube(yt: dict, jev: dict) -> list[Item]:
         v.chips.append(a["format"].choice.replace("_", " "))
         v.topic = a["topic"].choice
         apply_topics(v, a, yt["hide_topics"], jev["topic_match"])
-    return videos
+    settings = {"days": yt["days"], "hide_keywords": yt["hide_keywords"], "hide_topics": yt["hide_topics"]}
+    return videos, rules_of(jev, qs, settings | {"topic_match": jev["topic_match"]})
 
 
 # ---------- output ----------
@@ -401,15 +437,54 @@ def write(sections: dict[str, list[Item]]) -> None:
     print(f"-> {out}")
 
 
+def save(sections: dict[str, list[Item]], rules: dict[str, dict]) -> None:
+    """Record every item, shown or hidden, and how it was judged, in state/items.db.
+
+    Items are keyed by section and id. Judgements are keyed by item and rules, so the latest
+    judgement under each set of rules is kept, and changing the rules starts new rows.
+    """
+    db = sqlite3.connect(ROOT / "state" / "items.db")
+    db.executescript(DB_SCHEMA)
+    now, summary = time.time(), {}
+    with db:
+        for key, items in sections.items():
+            text = json.dumps(rules[key], sort_keys=True)
+            rules_id = hashlib.sha256(text.encode()).hexdigest()[:12]
+            db.execute("insert or ignore into rules values (?, ?, ?, ?)", (rules_id, key, now, text))
+            for it in items:
+                db.execute(
+                    """insert into items values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict (section, id) do update set title = excluded.title,
+                      summary = excluded.summary, link = excluded.link, outlet = excluded.outlet,
+                      domain = excluded.domain, image = excluded.image,
+                      published = excluded.published, last_seen = excluded.last_seen""",
+                    (key, it.id, it.title, it.summary, it.link, it.outlet, it.domain, it.image, it.published, now, now),
+                )
+                db.execute(
+                    "insert or replace into judgements values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        key, it.id, rules_id, now, it.model or None,
+                        json.dumps(it.answers) if it.answers else None,
+                        it.topic, json.dumps(it.chips), json.dumps(it.hidden_because), int(not it.hidden_because),
+                    ),
+                )
+            shown = sum(not it.hidden_because for it in items)
+            summary[key] = {"rules_id": rules_id, "items": len(items), "shown": shown}
+        db.execute("insert into runs values (?, ?)", (now, json.dumps(summary)))
+    db.close()
+
+
 def main() -> None:
     path = ROOT / "config.toml"
     if not path.exists():
         raise SystemExit("No config.toml. Copy config.example.toml to config.toml and edit it.")
     cfg = tomllib.loads(path.read_text())
-    sections = {"news": run_news(cfg["news"], cfg["jev"])}
+    sections, rules = {}, {}
+    sections["news"], rules["news"] = run_news(cfg["news"], cfg["jev"])
     if cfg.get("youtube", {}).get("channel_handle"):
-        sections["youtube"] = run_youtube(cfg["youtube"], cfg["jev"])
+        sections["youtube"], rules["youtube"] = run_youtube(cfg["youtube"], cfg["jev"])
     write(sections)
+    save(sections, rules)
 
 
 if __name__ == "__main__":
