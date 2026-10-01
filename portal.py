@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["typesafe-sdk>=0.7.1", "feedparser>=6", "httpx>=0.27"]
+# dependencies = ["typesafe-sdk>=0.7.1", "feedparser>=6", "httpx>=0.27", "numpy>=2"]
 # ///
 """Pull news and YouTube feeds, filter them with plain code and Jev, write out/index.html."""
 
@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import feedparser
 import httpx
+import numpy as np
 from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul, Score
 
 ROOT = Path(__file__).parent
@@ -48,22 +49,25 @@ VIDEO_FORMATS = {
     "music": "Music performance or music video",
     "gaming": "Video game play or gaming content",
 }
-TOPICS = {
-    "politics": "Government, elections, policy, or political figures",
-    "world": "International affairs, conflicts, or events in other countries",
-    "business": "Companies, markets, the economy, money, or investing",
-    "tech": "Technology, software, AI, gadgets, or the internet",
-    "science": "Science, space, engineering, nature, or the environment",
-    "health": "Health, medicine, or fitness",
-    "sports": "Sports and athletes",
-    "entertainment": "Movies, TV, music, celebrities, games, or pop culture",
-    "lifestyle": "Travel, food, home, hobbies, relationships, or personal life",
-    "other": "None of the above",
-}
-TOPIC_QUESTION = Choice(instructions="What is the main subject?", criteria=TOPICS)
+SIGNIFICANCE_LEVELS = [
+    "Routine: local, niche, or everyday news that few people outside its area will follow",
+    "Notable: a national story that gets coverage but will be forgotten within days",
+    "Major: a top national or world story that most people will hear about",
+    "Historic: an event that will be remembered for years",
+]
+MAJOR_NEWS = "Major news"
+OTHER = "Other"
+WOO_QUESTION = Noul(
+    instructions="This promotes pseudoscience or new-age woo as real: astrology, crystals, manifestation, "
+    "psychic powers, energy healing, or similar claims."
+)
+ROUTINE_BUSINESS_QUESTION = Noul(
+    instructions="This is routine business news: a funding round, valuation, earnings, stock move, ordinary "
+    "deal, or executive hire, rather than a major shift in its industry."
+)
 KEEP_SEEN_DAYS = 14
 # Bump when the code's hide or grouping logic changes, so stored judgements stay comparable.
-RULES_REVISION = 1
+RULES_REVISION = 4
 DB_SCHEMA = """
 create table if not exists items (
   section text not null, id text not null, title text, summary text, link text, outlet text,
@@ -140,6 +144,34 @@ def apply_topics(it: Item, answers, topics: list[str], threshold: float) -> None
             it.hidden_because.append(f"topic: {topic} ({p:.2f})")
 
 
+def interest_questions(interests: list[dict], noun: str) -> dict:
+    return {f"interest_{i}": Noul(instructions=f"This {noun} is mainly about {x['about']}.") for i, x in enumerate(interests)}
+
+
+def best_interest(answers, interests: list[dict]) -> tuple[dict, float]:
+    """The interest the item matches most strongly, and how strongly."""
+    p, i = max((answers[f"interest_{i}"].noul, i) for i in range(len(interests)))
+    return interests[i], p
+
+
+def judge_interest(it: Item, answers, interests: list[dict], jev: dict) -> bool:
+    """File the item under its best interest. Returns False when it matches none."""
+    interest, p = best_interest(answers, interests)
+    if p < jev["interest_match"]:
+        return False
+    it.topic = interest["name"]
+    routine = answers["routine_business"].noul
+    if interest.get("hide_routine_business") and routine >= jev["routine_business"]:
+        it.hidden_because.append(f"routine business ({routine:.2f})")
+    return True
+
+
+def hide_woo(it: Item, answers, jev: dict) -> None:
+    woo = answers["woo"].noul
+    if woo >= jev["woo"]:
+        it.hidden_because.append(f"woo ({woo:.2f})")
+
+
 async def ask_jev(items: list[Item], state_of, qs: dict, jev: dict) -> list:
     """One Jev request per item, all with the same questions. Returns answers in order, and keeps
     a copy of each item's answers on the item."""
@@ -206,7 +238,7 @@ def read_news_feed(feed: str | dict) -> list[Item]:
     return items
 
 
-def run_news(news: dict, jev: dict) -> tuple[list[Item], dict]:
+def run_news(news: dict, interests: list[dict], jev: dict, emb: dict) -> tuple[list[Item], dict]:
     with ThreadPoolExecutor(8) as pool:
         stories = [s for batch in pool.map(read_news_feed, news["feeds"]) for s in batch]
     seen, unique = set(), []
@@ -215,6 +247,9 @@ def run_news(news: dict, jev: dict) -> tuple[list[Item], dict]:
         if k and k not in seen:
             seen.add(k)
             unique.append(s)
+    # Blog feeds can hold years of posts; undated items are kept.
+    since = time.time() - news["days"] * 86400
+    unique = [s for s in unique if not s.published or s.published >= since]
 
     paywall = news["paywall_domains"]
     for s in unique:
@@ -230,26 +265,97 @@ def run_news(news: dict, jev: dict) -> tuple[list[Item], dict]:
             instructions="How politically one-sided is the wording and framing of this story?",
             criteria=SLANT_LEVELS,
         ),
-        "topic": TOPIC_QUESTION,
+        "significance": Score(
+            instructions="How significant is this news event?", criteria=SIGNIFICANCE_LEVELS
+        ),
+        "woo": WOO_QUESTION,
+        "routine_business": ROUTINE_BUSINESS_QUESTION,
+        **interest_questions(interests, "story"),
         **topic_questions(news["hide_topics"], "story"),
     }
 
     def state_of(s: Item) -> dict:
         return {"headline": s.title, "outlet": s.outlet} | ({"summary": s.summary} if s.summary else {})
 
+    major = {}  # story id -> chance it is major or historic news, for stories outside your interests
     for s, a in zip(todo, asyncio.run(ask_jev(todo, state_of, qs, jev))):
         fmt = a["format"].choice
-        s.topic = a["topic"].choice
         if fmt != "straight_news":
             s.chips.append(fmt.replace("_", " "))
-        if fmt in news["hide_formats"]:
+        if judge_interest(s, a, interests, jev):
+            hide_formats = news["interest_hide_formats"]
+        else:
+            p = a["significance"].probabilities
+            major[s.id] = sum(p.get(i, 0) for i in range(2, len(SIGNIFICANCE_LEVELS)))
+            hide_formats = news["hide_formats"]
+        if fmt in hide_formats:
             s.hidden_because.append(f"format: {fmt}")
+        hide_woo(s, a, jev)
         strong = a["slant"].probabilities[len(SLANT_LEVELS) - 1]
         if strong >= jev["strong_slant"]:
             s.hidden_because.append(f"strong slant ({strong:.2f})")
         apply_topics(s, a, news["hide_topics"], jev["topic_match"])
-    settings = {k: news[k] for k in ("paywall_domains", "hide_keywords", "hide_topics", "hide_formats")}
-    return unique, rules_of(jev, qs, settings | {k: jev[k] for k in ("strong_slant", "topic_match")})
+    # Stories outside your interests are shown only as major news, one card per event.
+    pick_major_news([s for s in todo if s.id in major], major, news, jev, emb)
+    settings = {
+        k: news[k]
+        for k in ("days", "paywall_domains", "hide_keywords", "hide_topics", "hide_formats", "interest_hide_formats", "major_min_outlets")
+    }
+    cutoffs = {k: jev[k] for k in ("strong_slant", "topic_match", "interest_match", "major_news", "woo", "routine_business")}
+    same_event = {"embedding_model": emb["model"], "same_event": emb["same_event"]}
+    return unique, rules_of(jev, qs, settings | cutoffs | same_event | {"interests": interests})
+
+
+def same_events(stories: list[Item], emb: dict) -> list[list[Item]]:
+    """Group stories about the same event, by how close their headlines and summaries are in meaning.
+
+    Stories should come most important first. Each event is built around its first story, and a
+    story joins only if it is close to that story, so loosely related stories don't chain together.
+    """
+    if not stories:
+        return []
+    texts = [f"{s.title}. {s.summary[:200]}" for s in stories]
+    key = secret(emb.get("api_key_env", "OPENROUTER_API_KEY"), emb)
+    vectors = []
+    for i in range(0, len(texts), 500):
+        r = httpx.post(
+            f"{emb['base_url']}/embeddings",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": emb["model"], "input": texts[i : i + 500]},
+            timeout=60,
+        )
+        r.raise_for_status()
+        vectors += [d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"])]
+    v = np.array(vectors)
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    close = (v @ v.T) >= emb["same_event"]
+
+    taken, events = set(), []
+    for i in range(len(stories)):
+        if i not in taken:
+            members = [j for j in np.nonzero(close[i])[0] if j not in taken]
+            taken.update(members)
+            events.append([stories[j] for j in members])
+    return events
+
+
+def pick_major_news(stories: list[Item], major: dict[str, float], news: dict, jev: dict, emb: dict) -> None:
+    """Show one card per event that enough outlets cover and Jev rates likely major news."""
+    stories = sorted(stories, key=lambda s: -major[s.id])
+    for event in same_events(stories, emb):
+        outlets = {s.outlet for s in event}
+        best = max(major[s.id] for s in event)
+        candidates = [s for s in event if not s.hidden_because]
+        if len(outlets) >= news["major_min_outlets"] and best >= jev["major_news"] and candidates:
+            lead = max(candidates, key=lambda s: major[s.id])
+            lead.topic = MAJOR_NEWS
+            lead.chips.append(f"+{len(outlets) - 1} outlets")
+            for s in candidates:
+                if s is not lead:
+                    s.hidden_because.append(f"same event as: {lead.title}")
+        else:
+            for s in event:
+                s.hidden_because.append(f"not an interest or major news ({len(outlets)} outlets, major {best:.2f})")
 
 
 # ---------- youtube ----------
@@ -302,7 +408,7 @@ def is_short(video_id: str) -> bool:
     return r.status_code == 200
 
 
-def run_youtube(yt: dict, jev: dict) -> tuple[list[Item], dict]:
+def run_youtube(yt: dict, interests: list[dict], jev: dict) -> tuple[list[Item], dict]:
     with httpx.Client(base_url="https://www.googleapis.com/youtube/v3/", params={"key": secret("YOUTUBE_API_KEY", yt)}) as api:
         channels = subscriptions(api, yt["channel_handle"])
         with ThreadPoolExecutor(16) as pool:
@@ -340,7 +446,9 @@ def run_youtube(yt: dict, jev: dict) -> tuple[list[Item], dict]:
     todo = [v for v in videos if not v.hidden_because]
     qs = {
         "format": Choice(instructions="What kind of video is this?", criteria=VIDEO_FORMATS),
-        "topic": TOPIC_QUESTION,
+        "woo": WOO_QUESTION,
+        "routine_business": ROUTINE_BUSINESS_QUESTION,
+        **interest_questions(interests, "video"),
         **topic_questions(yt["hide_topics"], "video"),
     }
 
@@ -349,10 +457,13 @@ def run_youtube(yt: dict, jev: dict) -> tuple[list[Item], dict]:
 
     for v, a in zip(todo, asyncio.run(ask_jev(todo, state_of, qs, jev))):
         v.chips.append(a["format"].choice.replace("_", " "))
-        v.topic = a["topic"].choice
+        if not judge_interest(v, a, interests, jev):
+            v.topic = OTHER  # your own subscriptions, so shown even when they match no interest
+        hide_woo(v, a, jev)
         apply_topics(v, a, yt["hide_topics"], jev["topic_match"])
     settings = {"days": yt["days"], "hide_keywords": yt["hide_keywords"], "hide_topics": yt["hide_topics"]}
-    return videos, rules_of(jev, qs, settings | {"topic_match": jev["topic_match"]})
+    cutoffs = {k: jev[k] for k in ("topic_match", "interest_match", "woo", "routine_business")}
+    return videos, rules_of(jev, qs, settings | cutoffs | {"interests": interests})
 
 
 # ---------- output ----------
@@ -392,11 +503,11 @@ def card(it: Item, wide_thumb: bool) -> str:
     )
 
 
-def panel(key: str, items: list[Item]) -> str:
+def panel(key: str, items: list[Item], groups: list[str]) -> str:
     kept = [it for it in items if not it.hidden_because]
     hidden = [it for it in items if it.hidden_because]
     wide = key == "youtube"
-    counts = {t: sum(it.topic == t for it in kept) for t in TOPICS}
+    counts = {g: sum(it.topic == g for it in kept) for g in groups}
     new = sum(it.new for it in kept)
     buttons = [f'<button class="f on" data-f="">All <b>{len(kept)}</b></button>']
     if new:
@@ -410,7 +521,7 @@ def panel(key: str, items: list[Item]) -> str:
     )
 
 
-def write(sections: dict[str, list[Item]]) -> None:
+def write(sections: dict[str, list[Item]], groups: dict[str, list[str]]) -> None:
     state_file = ROOT / "state" / "seen.json"
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     tabs, panels = [], []
@@ -420,7 +531,7 @@ def write(sections: dict[str, list[Item]]) -> None:
         shown = sum(not it.hidden_because for it in items)
         print(f"{'YouTube' if key == 'youtube' else 'News'}: {len(items)} items, {shown} shown, {len(items) - shown} hidden")
         tabs.append(f'<button class="tab" data-tab="{key}">{"YouTube" if key == "youtube" else "News"} <b>{shown}</b></button>')
-        panels.append(panel(key, items))
+        panels.append(panel(key, items, groups[key]))
 
     page = (
         (ROOT / "page.html")
@@ -479,11 +590,15 @@ def main() -> None:
     if not path.exists():
         raise SystemExit("No config.toml. Copy config.example.toml to config.toml and edit it.")
     cfg = tomllib.loads(path.read_text())
+    interests = cfg["interests"]
+    names = [x["name"] for x in interests]
     sections, rules = {}, {}
-    sections["news"], rules["news"] = run_news(cfg["news"], cfg["jev"])
+    sections["news"], rules["news"] = run_news(cfg["news"], interests, cfg["jev"], cfg["embeddings"])
+    groups = {"news": names + [MAJOR_NEWS]}
     if cfg.get("youtube", {}).get("channel_handle"):
-        sections["youtube"], rules["youtube"] = run_youtube(cfg["youtube"], cfg["jev"])
-    write(sections)
+        sections["youtube"], rules["youtube"] = run_youtube(cfg["youtube"], interests, cfg["jev"])
+        groups["youtube"] = names + [OTHER]
+    write(sections, groups)
     save(sections, rules)
 
 

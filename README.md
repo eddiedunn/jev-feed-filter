@@ -3,15 +3,20 @@
 Filters news and YouTube feeds and writes one static page, `out/index.html`, with a News tab
 and a YouTube tab.
 
-- **News**: drops paywalled sites, strongly slanted stories (from either side), opinion and
-  promotional pieces, and any keywords or topics you list.
-- **YouTube**: drops Shorts and livestreams from your subscriptions, and labels everything else
-  with its length and type (tutorial, review, explainer, and so on).
+- **Your interests:** you describe them in plain English, and each story or video is filed under
+  the one it matches best.
+- **News**: shows stories that match an interest, plus a handful of **major news** events: ones
+  that at least three outlets cover and Jev rates as major, shown once each. Everything else is
+  hidden, as are paywalled sites, strongly slanted stories (from either side), promotional pieces,
+  and any keywords or topics you list.
+- **YouTube**: drops Shorts and livestreams from your subscriptions, files the rest under your
+  interests (or "Other"), and labels each with its length and type (tutorial, review, explainer,
+  and so on).
 
 <p align="center"><img src="docs/screenshot.png" alt="The News tab on a phone: topic filter buttons above cards with an image, headline, summary, outlet, age, and topic and format chips" width="360"></p>
 
 Exact checks (paywalled domains, keywords, video length, Shorts, livestreams) are done in plain
-code. Judgment calls (story format, slant, topic, video type) are made by
+code. Judgment calls (interests, significance, story format, slant, video type) are made by
 [Jev](https://docs.typesafe.ai), TypeSafe's "System One" model. Jev answers fixed questions with
 probabilities instead of writing text, so it's fast and cheap: a full pass over a few hundred
 stories and videos costs around a cent.
@@ -20,8 +25,8 @@ On the page:
 - **Cards:** each item shows its image or video thumbnail (when the feed has one), the feed's
   summary, the outlet, how long ago it was published, and chips for its topic and format.
   Videos also show their length.
-- **Filter buttons:** show one topic at a time. Topics are politics, world, business, tech,
-  science, health, sports, entertainment, lifestyle and other.
+- **Filter buttons:** show one interest at a time, plus **Major news** on the News tab and
+  **Other** on the YouTube tab.
 - **New since last run:** items that arrived since the previous run are marked **New** and get
   their own filter button. The page remembers what it has shown in `state/seen.json`, for 14 days.
 - **Hidden section:** each tab has a collapsed **Hidden** section listing every dropped item and
@@ -38,6 +43,8 @@ You need [uv](https://docs.astral.sh/uv/) and two keys:
 |---|---|---|
 | `OPENROUTER_API_KEY` | Calling Jev | [openrouter.ai](https://openrouter.ai) (Jev is `~typesafe/jev-latest`) |
 | `YOUTUBE_API_KEY` | Reading subscriptions and video details | Google Cloud console, YouTube Data API v3 |
+
+The OpenRouter key is also used for embeddings, to spot stories about the same event.
 
 Then:
 
@@ -60,13 +67,20 @@ section instead of an environment variable. The environment variable wins when b
 Everything is in `config.toml`:
 
 - **`[news]`**: `feeds` (each a URL, or `{ name = "BBC", url = "..." }` to set the outlet name
-  shown on the page), `paywall_domains`, `hide_keywords`, `hide_topics`, `hide_formats`
-  (any of `straight_news`, `analysis`, `opinion`, `promotional`).
-- **`[jev]`**: model, endpoint, key, concurrency, and the cutoffs.
-  - `strong_slant`: hide a story when the probability that it is strongly one-sided is at least
-    this.
-  - `topic_match`: hide an item when the probability that it's about a listed topic is at least
-    this.
+  shown on the page), `days` to look back, `paywall_domains`, `hide_keywords`, `hide_topics`,
+  `hide_formats` for major news and `interest_hide_formats` for your interests (any of
+  `straight_news`, `analysis`, `opinion`, `promotional`), and `major_min_outlets`.
+- **`[[interests]]`**: one block per interest, in button order: a `name`, what it's `about`, and
+  optionally `hide_routine_business = true` to hide funding rounds, earnings and the like.
+- **`[jev]`**: model, endpoint, key, concurrency, and the cutoffs (probabilities from 0 to 1):
+  - `interest_match`: file an item under an interest.
+  - `major_news`: count an event as major or historic news.
+  - `strong_slant`: hide a story that is strongly one-sided.
+  - `topic_match`: hide an item about a listed topic.
+  - `woo`: hide astrology, crystals, manifestation and similar claims.
+  - `routine_business`: hide routine business news under interests that ask for it.
+- **`[embeddings]`**: the model used to spot stories about the same event, and `same_event`, how
+  close in meaning two stories must be.
 - **`[youtube]`**: `channel_handle` (leave empty to skip YouTube), `days` to look back,
   `hide_keywords`, `hide_topics`.
 
@@ -77,7 +91,11 @@ Topics are plain English, e.g. `hide_topics = ["celebrity gossip", "sports betti
 **News.** Stories come from RSS feeds. For Google News, the real publisher's domain is read from
 each item's `<source>` tag, so paywalled sites are caught without opening the link. Stories that
 pass the paywall and keyword checks go to Jev. It gets one request per story with the headline,
-the outlet and the feed's summary, and it scores format, slant and each hidden topic.
+the outlet and the feed's summary, and it scores each interest, significance, format, slant, woo,
+routine business and each hidden topic. Stories that match no interest are grouped by event using
+embeddings: each event is built around its most significant story, and stories close enough in
+meaning to that one join it. An event becomes a **Major news** card when enough outlets cover it
+and Jev rates it likely major; its other stories are hidden as "same event".
 
 **YouTube.** Your channel list is read from your **public** subscription list. A plain API key
 can't read private subscriptions, so set them to public in YouTube's privacy settings. Recent

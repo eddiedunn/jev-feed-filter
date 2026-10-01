@@ -12,7 +12,55 @@ feeds = [
   { name = "AllSides", url = "https://www.allsides.com/rss/news" },
   { name = "The Hill", url = "https://thehill.com/feed/" },
   { name = "Fox News", url = "https://moxie.foxnews.com/google-publisher/latest.xml" },
+  { name = "ABC News", url = "https://feeds.abcnews.com/abcnews/topstories" },
+  # AI
+  { name = "Ars Technica", url = "https://arstechnica.com/ai/feed/" },
+  { name = "Simon Willison", url = "https://simonwillison.net/atom/everything/" },
+  { name = "The Decoder", url = "https://the-decoder.com/feed/" },
+  { name = "The Verge", url = "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml" },
+  { name = "Import AI", url = "https://importai.substack.com/feed" },
+  { name = "Interconnects", url = "https://www.interconnects.ai/feed" },
+  { name = "Latent Space", url = "https://www.latent.space/feed" },
+  { name = "Google DeepMind", url = "https://deepmind.google/blog/rss.xml" },
+  # Crypto
+  { name = "The Block", url = "https://www.theblock.co/rss.xml" },
+  { name = "CoinDesk", url = "https://www.coindesk.com/arc/outboundfeeds/rss/" },
+  { name = "Decrypt", url = "https://decrypt.co/feed" },
+  { name = "Protos", url = "https://protos.com/feed/" },
+  { name = "Bitcoin Optech", url = "https://bitcoinops.org/feed.xml" },
+  { name = "Ethereum Foundation", url = "https://blog.ethereum.org/feed.xml" },
+  # New tech and science
+  { name = "IEEE Spectrum", url = "https://spectrum.ieee.org/feeds/feed.rss" },
+  { name = "Ars Technica", url = "https://arstechnica.com/science/feed/" },
+  { name = "Ars Technica", url = "https://arstechnica.com/space/feed/" },
+  { name = "Quanta", url = "https://www.quantamagazine.org/feed/" },
+  { name = "New Atlas", url = "https://newatlas.com/index.rss" },
+  { name = "Canary Media", url = "https://www.canarymedia.com/rss.rss" },
+  # IT and engineering
+  { name = "Hacker News", url = "https://hnrss.org/best" },
+  { name = "Lobsters", url = "https://lobste.rs/rss" },
+  { name = "The Register", url = "https://www.theregister.com/headlines.atom" },
+  { name = "InfoQ", url = "https://www.infoq.com/feed/" },
+  { name = "Cloudflare", url = "https://blog.cloudflare.com/rss/" },
+  { name = "BleepingComputer", url = "https://www.bleepingcomputer.com/feed/" },
+  { name = "Krebs on Security", url = "https://krebsonsecurity.com/feed/" },
+  # Eastern religion
+  { name = "Tricycle", url = "https://tricycle.org/feed/" },
+  { name = "Lion's Roar", url = "https://www.lionsroar.com/feed/" },
+  { name = "Buddhism Now", url = "https://www.buddhismnow.com/feed/" },
+  { name = "Plum Village", url = "https://plumvillage.org/feed/" },
+  { name = "Advaita Vision", url = "https://advaita-vision.org/feed/" },
+  { name = "Secular Buddhism", url = "https://secularbuddhism.org/feed/" },
+  # Spirituality and mind
+  { name = "Psyche", url = "https://psyche.co/feed" },
+  { name = "Aeon", url = "https://aeon.co/feed.rss" },
+  { name = "Science and Nonduality", url = "https://www.scienceandnonduality.com/feed" },
+  { name = "The Marginalian", url = "https://www.themarginalian.org/feed/" },
+  { name = "Essentia Foundation", url = "https://www.essentiafoundation.org/feed/" },
 ]
+
+# Stories older than this many days are dropped; some blog feeds hold years of posts.
+days = 4
 
 # Stories from these sites are dropped before Jev sees them. A starter list of
 # sites known to paywall; add any site that asks you to pay.
@@ -31,12 +79,50 @@ hide_keywords = []
 
 # Plain-English topics. Jev hides a story that is mainly about one of these.
 hide_topics = [
+  "sports",
   # "celebrity gossip",
-  # "sports",
 ]
 
-# Story formats to hide: straight_news, analysis, opinion, promotional
+# Story formats to hide (straight_news, analysis, opinion, promotional), for major news and for
+# stories that match an interest. Blog posts and essays often count as opinion.
 hide_formats = ["opinion", "promotional"]
+interest_hide_formats = ["promotional"]
+
+# A story outside your interests is shown as major news only when at least this many outlets
+# cover the same event and Jev rates it likely major (see major_news below). Each event gets
+# one card.
+major_min_outlets = 3
+
+# What you want to see, in the order of the filter buttons. Jev files each item under the
+# interest it matches best. A news story that matches none is shown under "Major news" only if
+# it is significant enough; a video that matches none goes under "Other".
+# hide_routine_business hides funding rounds, earnings and similar routine business stories.
+[[interests]]
+name = "AI"
+about = "artificial intelligence: AI models, research, tools, or how AI systems are built and used"
+hide_routine_business = true
+
+[[interests]]
+name = "Crypto"
+about = "cryptocurrency or blockchain: Bitcoin, Ethereum, crypto markets, protocols, or crypto security"
+
+[[interests]]
+name = "New tech"
+about = "new technology or innovation: new hardware, energy, biotech, space, robotics, or scientific breakthroughs"
+hide_routine_business = true
+
+[[interests]]
+name = "IT & engineering"
+about = "software, IT or systems engineering: programming, infrastructure, devops, cloud, Linux, or computer security"
+hide_routine_business = true
+
+[[interests]]
+name = "Eastern religion"
+about = "Eastern religion or contemplative practice: Buddhism, Zen, Taoism, Hinduism, Vedanta, or meditation"
+
+[[interests]]
+name = "Spirituality"
+about = "spirituality, consciousness, or philosophy of mind: non-duality, mindfulness, or the inner life"
 
 [jev]
 model = "~typesafe/jev-latest"
@@ -48,6 +134,18 @@ concurrency = 10
 # Probability at or above which a story is hidden.
 strong_slant = 0.5
 topic_match = 0.7
+interest_match = 0.5      # file an item under an interest
+major_news = 0.7          # chance an event is major or historic news, for the major news group
+woo = 0.5
+routine_business = 0.6
+
+# Used to spot stories about the same event, so major news gets one card per event.
+[embeddings]
+model = "openai/text-embedding-3-small"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+# gopass_key = "path/to/key"
+same_event = 0.45                   # how close in meaning (0 to 1) two stories must be
 
 [youtube]
 channel_handle = ""                 # e.g. "@YourHandle"; subscriptions must be public. Empty skips YouTube.
@@ -57,4 +155,4 @@ days = 3                            # how far back to look
 
 # Same idea as news: exact words hide a video; topics are judged by Jev.
 hide_keywords = []
-hide_topics = []
+hide_topics = ["sports"]
